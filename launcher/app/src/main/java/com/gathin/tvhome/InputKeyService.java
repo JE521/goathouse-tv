@@ -59,6 +59,58 @@ public class InputKeyService extends AccessibilityService {
         if (gamepads == null) gamepads = GamepadPassthrough.start(this, config);
     }
 
+    /** goathouse: keys mapped in Launcher settings prefs: Guide = rows/dock, profile button = Who's watching. */
+    /** Settings → Remote → Learn a button: the next non-reserved button goes here instead of doing anything. */
+    static volatile java.util.function.IntConsumer learn;
+
+    private final android.os.Handler keys = new android.os.Handler(android.os.Looper.getMainLooper());
+    private boolean held;
+    private final Runnable hold = () -> {
+        held = true;
+        MusicActivity m = MusicActivity.live.get();
+        if (m != null && MusicActivity.visible) m.toggleBar();
+    };
+
+    /** On the music screens the rows ↔ dock button means: press = Now Playing ↔ Music, hold = lower/raise the player bar. */
+    private boolean musicGuide(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            if (event.getRepeatCount() == 0) { held = false; keys.postDelayed(hold, 500); }
+            return true;
+        }
+        keys.removeCallbacks(hold);
+        if (held || event.isCanceled()) return true;
+        if (NowPlayingActivity.visible) {
+            startActivity(new Intent(this, MusicActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+        } else {
+            startActivity(new Intent(this, NowPlayingActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        }
+        return true;
+    }
+
+    /** goathouse: buttons mapped in Settings → Remote (ButtonMap); unmapped ones fall through to theme app keys. */
+    private boolean goathouseKey(KeyEvent event) {
+        int code = event.getKeyCode();
+        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+            android.view.InputDevice dev = event.getDevice();
+            android.util.Log.i("GoatKeys", KeyEvent.keyCodeToString(code) + " scan " + event.getScanCode()
+                    + " from " + (dev == null ? "?" : dev.getName()));
+            ButtonMap.seen(this, code, dev);
+        }
+        java.util.function.IntConsumer l = learn;
+        if (l != null && !ButtonMap.reserved(code)) {
+            if (event.getAction() == KeyEvent.ACTION_UP) {
+                learn = null;
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> l.accept(code));
+            }
+            return true;
+        }
+        String action = ButtonMap.action(this, KeyEvent.keyCodeToString(code));
+        if (action == null) return false;
+        if ("shelf".equals(action) && (MusicActivity.visible || NowPlayingActivity.visible)) return musicGuide(event);
+        if (event.getAction() != KeyEvent.ACTION_UP || event.isCanceled()) return true;   // act on release only
+        return ButtonMap.run(this, action);
+    }
+
     private boolean isInputKey(int keyCode) {
         if (keyCode == KeyEvent.KEYCODE_TV || keyCode == KeyEvent.KEYCODE_TV_INPUT) return true;
         for (int code : inputKeycodes) if (keyCode == code) return true;
@@ -68,6 +120,7 @@ public class InputKeyService extends AccessibilityService {
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
         if (consumeVolumeKeys && VolumeKeys.handle(this, event)) return true;
+        if (goathouseKey(event)) return true;
         // A scancode entry is more specific than any keycode, so it goes first.
         if (RemoteKeys.handle(this, event, RemoteKeys.tap(appScancodes.get(event.getScanCode()),
                 frontAppScancodes.get(event.getScanCode())),
@@ -75,6 +128,12 @@ public class InputKeyService extends AccessibilityService {
         if (RemoteKeys.handle(this, event, RemoteKeys.tap(appKeys.get(event.getKeyCode()),
                 frontAppKeys.get(event.getKeyCode())),
                 holdAppKeys.get(event.getKeyCode()))) return true;
+        // A branded button (YouTube, Netflix…) with no theme entry opens the matching app found on this TV.
+        String app = ButtonMap.detectedApp(this, KeyEvent.keyCodeToString(event.getKeyCode()));
+        if (app != null) {
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) ButtonMap.launch(this, app);
+            return true;
+        }
         if (!isInputKey(event.getKeyCode())) return false;
         if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
             try {

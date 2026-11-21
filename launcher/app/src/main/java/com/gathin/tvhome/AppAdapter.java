@@ -214,6 +214,22 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     private final Map<String, String> launchActions;
     /** Hold OK opens the activity's tile menu (config.xml, tile_menu); false opens App info, as before. */
     private final boolean tileMenu;
+    /**
+     * goathouse: tile art pushed to this TV (art/<package>.png in the launcher's files, see push-theme.sh), kept
+     * out of the repo because it is other companies' artwork. Wins over the bundled and the app's own banner.
+     */
+    private Drawable localArt(String key) {
+        java.io.File dir = Config.dir(ctx);
+        if (dir == null) return null;
+        for (String ext : new String[]{".png", ".jpg", ".webp"}) {
+            java.io.File f = new java.io.File(dir, ThemeFiles.ART + "/" + key + ext);
+            if (!f.isFile()) continue;
+            android.graphics.Bitmap b = android.graphics.BitmapFactory.decodeFile(f.getPath());
+            if (b != null) return new android.graphics.drawable.BitmapDrawable(ctx.getResources(), b);
+        }
+        return null;
+    }
+
     /** Tile names and bundled banners that replace the app's own (config.xml, app_labels and app_banners). */
     private final Map<String, String> appLabels, appBanners;
     /** Every app tile is its icon on a card tinted from that icon, never its banner (config.xml, uniform_tiles). */
@@ -286,7 +302,9 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         for (ResolveInfo ri : found) {
             if (ri.activityInfo == null) continue;
             String pkg = ri.activityInfo.packageName;
-            if (pkg.equals(ctx.getPackageName()) || !ri.activityInfo.exported
+            // goathouse: of this launcher's own entries, only the Music tile shows.
+            boolean ownMusic = pkg.equals(ctx.getPackageName()) && ri.activityInfo.name.endsWith(".MusicApp");
+            if ((pkg.equals(ctx.getPackageName()) && !ownMusic) || !ri.activityInfo.exported
                     || !LibraryApps.visible(tvPackages.contains(pkg), hidden.contains(pkg), added.contains(pkg), removed.contains(pkg))) continue;
             ComponentName component = new ComponentName(pkg, ri.activityInfo.name);
             Cards.Card card = cardByPkg.get(pkg);
@@ -299,7 +317,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             Drawable banner = null;
             // uniform_tiles draws the icon, so an app's banner is never loaded. A module card keeps its banner.
             if (!(uniformTiles && card == null)) {
-                banner = bundledBanner(appBanners.get(pkg));
+                banner = localArt(ownMusic ? pkg + ".music" : pkg);
+                if (banner == null) banner = bundledBanner(appBanners.get(pkg));
                 if (banner == null) banner = iconTiles.contains(pkg) ? iconBanner(ri.loadIcon(pm)) : loadBanner(pm, ri);
             }
             // The icon is only drawn (and sampled for the glow) when there is no banner, so a tile with a

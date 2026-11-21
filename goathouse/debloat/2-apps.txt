@@ -1,0 +1,11 @@
+# Batch 2: preloaded Google/streaming apps a self-hosted house doesn't need, Google screensaver, Chromecast
+com.google.android.play.games
+com.google.android.marvin.talkback
+com.android.printspooler
+com.google.android.youtube.tv
+com.google.android.youtube.tvmusic
+com.netflix.ninja
+com.netflix.tokenmanager
+com.google.android.apps.tv.dreamx
+com.google.android.apps.mediashell
+com.google.android.syncadapters.calendar

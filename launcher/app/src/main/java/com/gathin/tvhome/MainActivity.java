@@ -66,6 +66,8 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
+import android.widget.ScrollView;
+import android.util.Log;
 import android.widget.PopupWindow;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -326,6 +328,34 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      * reach Home after onPause, when that key opened another app, and must not start the clock over the app.
      */
     private boolean resumed;
+    // goathouse: tv-feed media rows (null when the theme names no feed_url)
+    private MediaShelf mediaShelf;
+    /** goathouse: the live Home, for the key helper's Guide button. */
+    static java.lang.ref.WeakReference<MainActivity> live = new java.lang.ref.WeakReference<>(null);
+
+    /** Guide button on Home: rows -> dock, dock (or anything else) -> rows. True when handled. */
+    boolean toggleShelfDock() {
+        if (!resumed || mediaShelf == null || !mediaShelf.isShowing()) return false;
+        if (mediaShelf.hasFocus()) {
+            int pos = lastFocused >= 0 && lastFocused < COLUMNS ? lastFocused : 0;
+            focusTile(Math.min(pos, Math.max(0, adapter.appCount() - 1)));
+        } else {
+            mediaShelf.focusRemembered();
+        }
+        return true;
+    }
+
+    boolean isResumedHome() { return resumed; }
+    private long shelfResumedAt;
+    private int lastKeyRepeat;
+    private ScrollView shelfView;
+    private final android.os.Handler shelfTick = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable shelfTickRun = new Runnable() {
+        @Override public void run() {
+            if (mediaShelf != null && resumed) mediaShelf.refreshIfStale();
+            shelfTick.postDelayed(this, 60_000L);
+        }
+    };
     /** Rebuild the tiles on the way back to Home only when apps changed meanwhile (TileRefresh). */
     private final TileRefresh tileRefresh = new TileRefresh();
     /** PackageManager's change counter at the last rebuild, to catch a package broadcast that never arrived. */
@@ -596,6 +626,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         lunarOffset = Lunar.offsetFor(cfg.lunarUtcOffset, Locale.getDefault());
         if (lunar) lunarDate.setVisibility(View.VISIBLE);
         greetingName = cfg.greetingName;
+        String profileName = Accounts.of(this).profile();   // goathouse: whose rows these are
+        if (!profileName.isEmpty()) greetingName = profileName;
         if (cfg.dateBelowClock) moveDateBelowClock();
         if (cfg.dateBelowClock && cfg.iconOnlyButtons && !cfg.topMenu
                 && !getResources().getBoolean(R.bool.rtl_menu_bar)) {
@@ -702,6 +734,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         Order savedOrder = Order.load(Order.file(this));
         adapter.setSavedOrder(Order.ranks(savedOrder, dockApps), Order.docked(savedOrder, dockApps));
         grid.setAdapter(adapter);
+        setUpMediaShelf();
 
         // tvOS layout: push the dock row towards the bottom of the screen, leaving room for
         // rows_below_dock grid rows under it; the rest of the grid stays below until you press Down.
@@ -831,7 +864,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         launcherSettingsButton = cfg.launcherSettingsButton;
         if (launcherSettingsButton) {
             ((TextView) btnSettings).setText(R.string.launcher_settings);
-            ((TextView) btnSettings).setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_home_settings_pill, 0, 0, 0);
+            ((TextView) btnSettings).setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_settings, 0, 0, 0);   // goathouse: a gear, not a house
         }
         btnSettings.setOnClickListener(v -> {
             if (launcherSettingsButton) startActivityForResult(
@@ -880,6 +913,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             topButtons.setLayoutParams(tlp);
             topButtons.setGravity(Gravity.CENTER_VERTICAL);
         }
+        // goathouse: Who's watching? pill next to Wi-Fi
+        TextView btnProfile = findViewById(R.id.btnProfile);
+        if (Accounts.of(this).hasJellyfin()) {
+            btnProfile.setVisibility(View.VISIBLE);
+            btnProfile.setOnClickListener(v -> startActivity(new Intent(this, ProfileActivity.class)));
+            if (iconOnlyButtons) makeIconOnly(btnProfile);
+        }
         if (iconOnlyButtons) {
             if (cfg.wifiLabelWidth > 0) btnWifi.setMaxWidth(Math.round(cfg.wifiLabelWidth * density));
             else makeIconOnly(btnWifi);
@@ -904,6 +944,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP) return true;
             if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                // goathouse: the media rows sit between the pills and the dock.
+                if (mediaShelf != null && mediaShelf.isShowing()) {
+                    mediaShelf.focusRemembered();
+                    return true;
+                }
                 // Back to the dock tile Up came from, not wherever the focus finder lands.
                 focusTile(singleRow ? lastFocused : lastFocused % COLUMNS);
                 return true;
@@ -916,6 +961,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         };
         btnInputs.setOnKeyListener(pillKeys);
         btnWifi.setOnKeyListener(pillKeys);
+        findViewById(R.id.btnProfile).setOnKeyListener(pillKeys);
         btnVpn.setOnKeyListener(pillKeys);
         btnSettings.setOnKeyListener(pillKeys);
         btnReorder.setOnKeyListener(pillKeys);
@@ -1091,6 +1137,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        live = new java.lang.ref.WeakReference<>(this);
         // A festival that started or ended while Home was in the background: rebuild with or without it.
         if (festive != festival.active(LocalDate.now())) {
             recreate();
@@ -1106,6 +1153,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         restartIdleClock();
         promptsPaused = false;
         if (grid.getAdapter() == null) grid.setAdapter(adapter);   // dropped by onTrimMemory
+        if (mediaShelf != null) {
+            shelfResumedAt = android.os.SystemClock.uptimeMillis();
+            // Back on Home: land on the media rows (the tile refocus above runs first, so wait a moment).
+            grid.postDelayed(() -> {
+                if (resumed && mediaShelf.isShowing() && !mediaShelf.hasFocus() && movingKey == null) mediaShelf.focusRemembered();
+            }, 180);
+            mediaShelf.refreshIfStale();
+            shelfTick.removeCallbacks(shelfTickRun);
+            shelfTick.postDelayed(shelfTickRun, 60_000L);
+        }
         switch (tileRefresh.onResume(packagesChangedSinceRebuild())) {
             case REBUILD:
                 tilesReady = false;
@@ -1307,6 +1364,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     protected void onPause() {
         super.onPause();
         resumed = false;
+        shelfTick.removeCallbacks(shelfTickRun);
         // No UP reaches a paused Home, so a vendor-key hold it saw go down would still open its app later.
         // Only Home's own share is dropped: a key service that saw the same DOWN keeps its hold.
         RemoteKeys.release(this);
@@ -1438,6 +1496,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      */
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getKeyCode() != KeyEvent.KEYCODE_HOME) shelfResumedAt = 0;
+        if (event.getAction() == KeyEvent.ACTION_DOWN) lastKeyRepeat = event.getRepeatCount();
         if (homeIgnoreChannelKeys && RemoteKeys.isChannelKey(event.getKeyCode())) return true;
         // Vendor keys (TCL Netflix button, 4062) never reach the key services, only the focused window, so their
         // "hold:" entries run here too or nowhere. Only while resumed: onPause releases Home's holds, and a DOWN
@@ -1775,6 +1835,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
+        // goathouse: Back jumps to the top of the section you are in (rows -> first card; apps -> the dock).
+        if (mediaShelf != null && mediaShelf.isShowing()) {
+            if (mediaShelf.hasFocus()) {
+                mediaShelf.focusFirst();
+            } else {
+                int pos = lastFocused < 0 ? 0 : lastFocused;
+                int target = pos < COLUMNS ? 0 : pos % COLUMNS;   // in the dock already: its first app
+                focusTile(Math.min(target, Math.max(0, adapter.appCount() - 1)));
+                grid.smoothScrollToPosition(0);
+            }
+            return;
+        }
         // Home screen: Back goes nowhere, unless back_opens_clock is on.
         if (backOpensClock) startActivity(new Intent(this, ClockActivity.class));
     }
@@ -1814,6 +1886,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override
     public void onTileFocused(int position, View card) {
+        // goathouse: Home restoring the last tile right after it resumes (not a key press): go to the rows instead.
+        if (mediaShelf != null && mediaShelf.isShowing() && movingKey == null
+                && android.os.SystemClock.uptimeMillis() - shelfResumedAt < 2000) {
+            mediaShelf.focusRemembered();
+            if (!dockTucked) setDockTucked(true);
+            else applyTuck(false);
+            return;
+        }
+        if (mediaShelf != null && dockTucked) setDockTucked(false);
         lastFocused = position;
         lastFocusedKey = adapter.keyAt(position);
         // Focus restored before the first layout (cold start): the tile has no size yet, and the glass
@@ -2251,6 +2332,105 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
     }
 
+    // ---- goathouse: media shelf ---------------------------------------------------------------------
+
+    private void setUpMediaShelf() {
+        SendspinService.startIfConfigured(this);   // goathouse: this TV as a Music Assistant player
+        FeedClient feed = FeedClient.fromTheme(this);
+        if (feed == null) return;
+        shelfView = findViewById(R.id.mediaShelf);
+        mediaShelf = new MediaShelf(this, shelfView, feed, new MediaShelf.Host() {
+            @Override public void onShelfFocused() {
+                hideGlass();
+                hideHero();
+                if (!dockTucked) setDockTucked(true);
+            }
+
+            @Override public void focusDock() {
+                int pos = lastFocused >= 0 && lastFocused < COLUMNS ? lastFocused : 0;
+                focusTile(Math.min(pos, Math.max(0, adapter.appCount() - 1)));
+            }
+
+            @Override public void onShelfShown(boolean firstTime) {
+                // Media first: on a fresh Home the rows are the default (dock tucked) and the first card takes focus.
+                if (firstTime) dockTucked = true;
+                grid.post(MainActivity.this::placeShelf);
+                if (firstTime && !mediaShelf.hasFocus()) mediaShelf.focusFirst();
+            }
+
+            @Override public void onPhotosChanged() {
+                // New album pictures: Config reads the wallpapers folder, so rebuild Home with them.
+                android.content.SharedPreferences c = getSharedPreferences(Config.SETTINGS_NAME, MODE_PRIVATE);
+                c.edit().putLong(Config.SETTINGS_REVISION_KEY, c.getLong(Config.SETTINGS_REVISION_KEY, 0) + 1).apply();
+                if (resumed && !mediaShelf.hasFocus()) recreate();
+            }
+        });
+        View header = (View) findViewById(R.id.topButtons).getParent();
+        if (shelfView instanceof ShelfScrollView) ((ShelfScrollView) shelfView).onUpEdge = () -> {
+            View pill = btnWifi != null && btnWifi.getVisibility() == View.VISIBLE ? btnWifi : findViewById(R.id.btnSettings);
+            if (pill != null) pill.requestFocus();
+        };
+        // The shelf fills the space between the header and the dock row (the grid's top padding).
+        grid.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> grid.post(this::placeShelf));
+        header.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> grid.post(this::placeShelf));
+    }
+
+    /** Dock pushed under the screen edge (only a sliver shows) while the media rows have focus. */
+    private boolean dockTucked;
+    private int tuckShift;
+    private static final int SHELF_ROWS_DP = 300;   // two rows: title + 96dp card + margins each
+    private static final int DOCK_PEEK_DP = 34;
+
+    private void placeShelf() {
+        if (shelfView == null) return;
+        View rootView = findViewById(R.id.root);
+        int[] root = new int[2], g = new int[2];
+        rootView.getLocationInWindow(root);
+        grid.getLocationInWindow(g);
+        int rootH = rootView.getHeight();
+        if (rootH == 0) return;
+        // Where the dock row starts with no translation (grid top + its padding), and how far it must move down so
+        // only DOCK_PEEK_DP of it is left on screen.
+        int dockTop = g[1] - root[1] - (int) grid.getTranslationY() + grid.getPaddingTop();
+        tuckShift = Math.max(0, rootH - (int) (DOCK_PEEK_DP * density) - dockTop);
+        int height = (int) (SHELF_ROWS_DP * density);
+        int top = rootH - (int) (DOCK_PEEK_DP * density) - (int) (10 * density) - height;
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) shelfView.getLayoutParams();
+        if (lp.topMargin != top || lp.height != height) {
+            lp.topMargin = top;
+            lp.height = height;
+            shelfView.setLayoutParams(lp);
+        }
+        Log.i("MediaShelf", "place top=" + top + " h=" + height + " shift=" + tuckShift + " tucked=" + dockTucked
+                + " vis=" + shelfView.getVisibility());
+        applyTuck(false);
+    }
+
+    private void setDockTucked(boolean tucked) {
+        dockTucked = tucked;
+        applyTuck(true);
+    }
+
+    private void applyTuck(boolean animate) {
+        if (shelfView == null) return;
+        boolean on = dockTucked && mediaShelf.isShowing();
+        // Tucked means the dock row sits at its home line: undo any scroll into the app grid first.
+        if (on && grid.computeVerticalScrollOffset() != 0) grid.scrollToPosition(0);
+        float gridY = on ? tuckShift : 0;
+        // With the dock up, the rows ride up with it and dim, so the dock reads as the thing in focus.
+        float shelfY = on ? 0 : -tuckShift;
+        float shelfA = on ? 1f : 0f;
+        if (animate && animations && !reducedMotion) {
+            grid.animate().translationY(gridY).setDuration(220).withEndAction(this::refitGlass).start();
+            shelfView.animate().translationY(shelfY).alpha(shelfA).setDuration(220).start();
+        } else {
+            grid.setTranslationY(gridY);
+            shelfView.setTranslationY(shelfY);
+            shelfView.setAlpha(shelfA);
+            grid.post(this::refitGlass);
+        }
+    }
+
     private void hideGlass() {
         if (!glassShown) return;
         glassShown = false;
@@ -2441,6 +2621,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override
     public boolean onTileVerticalKey(int position, int keyCode) {
+        shelfResumedAt = 0;
         int count = adapter.appCount();
         int target;
         if (singleRow) {
@@ -2470,9 +2651,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                     rtlAppGrid, keyCode == KeyEvent.KEYCODE_DPAD_LEFT);
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-            if (position < COLUMNS) return false;          // dock row: let focus move to the top bar
+            if (position < COLUMNS) {
+                // goathouse: the media rows sit above the dock; Up returns to them instead of the top bar.
+                if (mediaShelf != null && mediaShelf.isShowing()) {
+                    mediaShelf.focusRemembered();
+                    return true;
+                }
+                return false;                               // dock row: let focus move to the top bar
+            }
             target = position - COLUMNS;
         } else {
+            // goathouse: a held Down walks the media rows and stops at the dock; a fresh press goes on into the apps.
+            if (mediaShelf != null && position < COLUMNS && lastKeyRepeat > 0) return true;
             int lastRowStart = ((count - 1) / COLUMNS) * COLUMNS;
             if (position >= lastRowStart) {
                 if (adapter.isLibraryAt(count)) focusLibrary();

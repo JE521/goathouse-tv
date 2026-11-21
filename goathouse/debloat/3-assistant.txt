@@ -1,0 +1,2 @@
+# Batch 3: Google Assistant / voice search (mic button gets remapped to HA Assist later)
+com.google.android.katniss

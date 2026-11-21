@@ -1,0 +1,6 @@
+# Batch 1 (tested on onn 4K and onn FHD): telemetry, ad / federated-learning services
+com.google.android.feedback
+com.android.tv.feedbackconsent
+com.android.adservices.api
+com.android.ondevicepersonalization.services
+com.android.federatedcompute.services

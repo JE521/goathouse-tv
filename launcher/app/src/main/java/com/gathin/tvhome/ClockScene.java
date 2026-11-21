@@ -129,12 +129,16 @@ final class ClockScene {
         if (!cfg.clockWallpaper) return;
         // What Home plays, and Config puts the single wallpaper in it when a theme has no collection.
         // Reading cfg.wallpaper first held the screensaver on wallpaper.jpg while Home rotated.
-        if (cfg.wallpapers.isEmpty()) {
+        // goathouse: tv-feed's screensaver album (screensaver/ folder) wins over the background pictures.
+        File ssDir = Config.dir(ctx) == null ? null : new File(Config.dir(ctx), "screensaver");
+        List<File> screensaverPics = ssDir == null ? new ArrayList<>() : WallpaperRotation.images(ssDir);
+        List<File> pool = screensaverPics.isEmpty() ? cfg.wallpapers : screensaverPics;
+        if (pool.isEmpty()) {
             wallpaperFile = null;
         } else {
             // Start on the picture Home is showing. WallpaperPlayer records it under the same
             // preferences and the screensaver runs in the same process, so this is just a read.
-            rotation = new ArrayList<>(cfg.wallpapers);
+            rotation = new ArrayList<>(pool);
             String shown = ctx.getSharedPreferences("wallpaper_rotation", Context.MODE_PRIVATE)
                     .getString("image", "");
             File current = WallpaperRotation.find(rotation, shown);

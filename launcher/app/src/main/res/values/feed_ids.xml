@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- goathouse: tag for FeedClient image loads on recycled views -->
+<resources>
+    <item name="feed_image_tag" type="id" />
+    <item name="mediaShelf" type="id" />
+</resources>

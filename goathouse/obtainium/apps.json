@@ -1,0 +1,74 @@
+{
+ "apps": [
+  {
+   "id": "dev.imranr.obtainium",
+   "url": "https://github.com/ImranR98/Obtainium",
+   "author": "ImranR98",
+   "name": "Obtainium",
+   "additionalSettings": "{\"includePrereleases\": false, \"fallbackToOlderReleases\": true, \"verifyLatestTag\": false, \"sortMethodChoice\": \"date\", \"useLatestAssetDateAsReleaseDate\": false, \"apkFilterRegEx\": \"armeabi-v7a-release\\\\.apk$\"}",
+   "categories": [
+    "TV"
+   ]
+  },
+  {
+   "id": "org.jellyfin.androidtv",
+   "url": "https://github.com/jellyfin/jellyfin-androidtv",
+   "author": "jellyfin",
+   "name": "Jellyfin",
+   "additionalSettings": "{\"includePrereleases\": false, \"fallbackToOlderReleases\": true, \"verifyLatestTag\": false, \"sortMethodChoice\": \"date\", \"useLatestAssetDateAsReleaseDate\": false, \"apkFilterRegEx\": \"-release\\\\.apk$\"}",
+   "categories": [
+    "TV"
+   ]
+  },
+  {
+   "id": "org.smarttube.stable",
+   "url": "https://github.com/yuliskov/SmartTube",
+   "author": "yuliskov",
+   "name": "SmartTube",
+   "additionalSettings": "{\"includePrereleases\": false, \"fallbackToOlderReleases\": true, \"verifyLatestTag\": false, \"sortMethodChoice\": \"date\", \"useLatestAssetDateAsReleaseDate\": false, \"apkFilterRegEx\": \"stable.*armeabi-v7a\\\\.apk$\"}",
+   "categories": [
+    "TV"
+   ]
+  },
+  {
+   "id": "com.limelight",
+   "url": "https://github.com/moonlight-stream/moonlight-android",
+   "author": "moonlight-stream",
+   "name": "Moonlight",
+   "additionalSettings": "{\"includePrereleases\": false, \"fallbackToOlderReleases\": true, \"verifyLatestTag\": false, \"sortMethodChoice\": \"date\", \"useLatestAssetDateAsReleaseDate\": false, \"apkFilterRegEx\": \"nonRoot\"}",
+   "categories": [
+    "TV"
+   ]
+  },
+  {
+   "id": "org.localsend.localsend_app",
+   "url": "https://github.com/localsend/localsend",
+   "author": "localsend",
+   "name": "LocalSend",
+   "additionalSettings": "{\"includePrereleases\": false, \"fallbackToOlderReleases\": true, \"verifyLatestTag\": false, \"sortMethodChoice\": \"date\", \"useLatestAssetDateAsReleaseDate\": false, \"apkFilterRegEx\": \"android-arm32v7\\\\.apk$\"}",
+   "categories": [
+    "TV"
+   ]
+  },
+  {
+   "id": "io.github.sds100.keymapper",
+   "url": "https://github.com/keymapperorg/KeyMapper",
+   "author": "keymapperorg",
+   "name": "Key Mapper",
+   "additionalSettings": "{\"includePrereleases\": false, \"fallbackToOlderReleases\": true, \"verifyLatestTag\": false, \"sortMethodChoice\": \"date\", \"useLatestAssetDateAsReleaseDate\": false, \"apkFilterRegEx\": \"foss\\\\.apk$\"}",
+   "categories": [
+    "TV"
+   ]
+  },
+  {
+   "id": "com.aurora.store",
+   "url": "https://gitlab.com/AuroraOSS/AuroraStore",
+   "author": "AuroraOSS",
+   "name": "Aurora Store",
+   "additionalSettings": "{\"includePrereleases\": false, \"fallbackToOlderReleases\": true, \"verifyLatestTag\": false, \"sortMethodChoice\": \"date\", \"useLatestAssetDateAsReleaseDate\": false}",
+   "categories": [
+    "TV"
+   ]
+  }
+ ]
+}
