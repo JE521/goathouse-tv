@@ -1,3 +1,3 @@
-# your TVs' addresses and your own tile art stay local
-hosts.env
-art/
+# your TVs' addresses and your own tile art stay local (art may be a folder or a symlink)
+/hosts.env
+/art
