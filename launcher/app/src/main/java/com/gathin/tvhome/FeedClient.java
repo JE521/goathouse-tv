@@ -34,6 +34,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * goathouse: talks straight to the household's Jellyfin, Navidrome and Immich with the logins from Accounts.
@@ -51,7 +54,26 @@ final class FeedClient {
     private final Context app;
     private final Accounts acc;
     private final File diskCache;
-    private final ExecutorService net = Executors.newFixedThreadPool(3);
+    // Separate pools so nothing queues behind something slow: misc calls, row building, per-person requests,
+    // artwork downloads, and artwork already on disk. Static: Home recreates its FeedClient with the activity.
+    private static final ExecutorService net = pool("feed-misc", 2);
+    private static final ExecutorService ROWS = pool("feed-row", 6);
+    private static final ExecutorService REQ = pool("feed-req", 8);
+    private static final ExecutorService PEOPLE = pool("feed-person", 8);
+    private static final ExecutorService IMG_NET = pool("feed-img", 4);
+    private static final ExecutorService IMG_DISK = pool("feed-disk", 2);
+    /** Artwork being loaded: memKey -> views waiting for it, so one picture is never fetched twice at once. */
+    private static final Map<String, List<ImageView>> INFLIGHT = new HashMap<>();
+
+    private static ExecutorService pool(String name, int n) {
+        ThreadFactory tf = r -> {
+            Thread t = new Thread(r, name);
+            t.setDaemon(true);
+            t.setPriority(Thread.NORM_PRIORITY - 1);   // below the UI thread
+            return t;
+        };
+        return Executors.newFixedThreadPool(n, tf);
+    }
     private final Handler main = new Handler(Looper.getMainLooper());
     private static final LruCache<String, Bitmap> MEM = new LruCache<String, Bitmap>(
             (int) Math.min(24L * 1024 * 1024, Runtime.getRuntime().maxMemory() / 12)) {
@@ -87,35 +109,98 @@ final class FeedClient {
 
     // =============================== rows ===============================
 
+    /**
+     * The media rows. cb can run up to three times, each a complete set of rows: straight away from the last feed
+     * saved on disk (so Home shows its rows instantly, even after the launcher was restarted), again as soon as the
+     * Jellyfin rows are in (they no longer wait for music), and once more when every row is done.
+     */
     void feed(Callback<JSONObject> cb) {
-        async(() -> {
-            JSONArray rows = new JSONArray();
+        File cache = new File(app.getCacheDir(), "feed-" + feedKey() + ".json");
+        AtomicBoolean fresh = new AtomicBoolean();   // set before live rows are posted: the saved feed never lands after them
+        net.execute(() -> {
+            try {
+                if (cache.isFile()) {
+                    JSONObject cached = new JSONObject(new String(readAll(new java.io.FileInputStream(cache)), StandardCharsets.UTF_8));
+                    main.post(() -> { if (!fresh.get()) cb.done(cached); });
+                }
+            } catch (Exception e) { Log.w(TAG, "feed cache: " + e); }
+        });
+        ROWS.execute(() -> {
+            long t0 = System.currentTimeMillis();
+            List<String[]> ids = new ArrayList<>();          // {id, title}
+            List<Future<JSONArray>> parts = new ArrayList<>();
             if (acc.hasJellyfin()) {
-                addRow(rows, "continue", "Continue Watching", this::continueWatching);
-                addRow(rows, "nextup", "Next Up", this::nextUp);
-                addRow(rows, "recent", "Recently Added", this::recentlyAdded);
+                try { jellyfinUsers(); } catch (Exception e) { Log.w(TAG, "users: " + e); }   // once, before the rows fan out
+                row(ids, parts, "continue", "Continue Watching", this::continueWatching);
+                row(ids, parts, "nextup", "Next Up", this::nextUp);
+                row(ids, parts, "recent", "Recently Added", this::recentlyAdded);
             }
-            if (acc.hasHomeAssistant() && acc.hasMusicAssistant()) {
-                addRow(rows, "recentmusic", "Recently Played", this::recentlyPlayed);
-            }
+            if (acc.hasHomeAssistant() && acc.hasMusicAssistant()) row(ids, parts, "recentmusic", "Recently Played", this::recentlyPlayed);
             if (acc.hasNavidrome()) {
-                addRow(rows, "playlists", "Playlists", this::playlists);
-                addRow(rows, "music", "New Music", this::newMusic);
+                row(ids, parts, "playlists", "Playlists", this::playlists);
+                row(ids, parts, "music", "New Music", this::newMusic);
+            }
+            JSONArray[] got = new JSONArray[parts.size()];
+            boolean early = false;
+            for (int i = 0; i < parts.size(); i++) {
+                try { got[i] = parts.get(i).get(); } catch (Exception e) { Log.w(TAG, "row " + ids.get(i)[0] + ": " + e.getCause()); }
+                // The first two (Continue Watching, Next Up) are what people come for: show them now.
+                if (!early && i == Math.min(1, parts.size() - 1) && i < parts.size() - 1 && acc.hasJellyfin()) {
+                    early = true;
+                    JSONObject partial = assemble(ids, got, cache);
+                    if (partial != null) { fresh.set(true); main.post(() -> cb.done(partial)); }
+                }
+            }
+            JSONObject all = assemble(ids, got, null);
+            Log.i(TAG, "feed " + parts.size() + " rows in " + (System.currentTimeMillis() - t0) + " ms");
+            if (all == null) return;
+            try { writeAtomic(cache, all.toString().getBytes(StandardCharsets.UTF_8)); } catch (Exception ignored) { }
+            fresh.set(true);
+            main.post(() -> cb.done(all));
+        });
+    }
+
+    private void row(List<String[]> ids, List<Future<JSONArray>> parts, String id, String title, RowSource src) {
+        ids.add(new String[]{id, title});
+        parts.add(REQ.submit(src::load));
+    }
+
+    /** Rows in their fixed order. A row not loaded yet comes from the saved feed (fallback), so nothing jumps. */
+    private static JSONObject assemble(List<String[]> ids, JSONArray[] got, File fallback) {
+        try {
+            Map<String, JSONObject> old = new HashMap<>();
+            if (fallback != null && fallback.isFile()) {
+                JSONArray r = new JSONObject(new String(readAll(new java.io.FileInputStream(fallback)), StandardCharsets.UTF_8)).optJSONArray("rows");
+                if (r != null) for (int i = 0; i < r.length(); i++) old.put(r.getJSONObject(i).optString("id"), r.getJSONObject(i));
+            }
+            JSONArray rows = new JSONArray();
+            for (int i = 0; i < ids.size(); i++) {
+                JSONArray items = got[i];
+                if (items == null) {
+                    JSONObject o = old.get(ids.get(i)[0]);
+                    if (o != null) rows.put(o);
+                } else if (items.length() > 0) {
+                    rows.put(new JSONObject().put("id", ids.get(i)[0]).put("title", ids.get(i)[1]).put("items", items));
+                }
             }
             return new JSONObject().put("rows", rows);
-        }, cb);
+        } catch (Exception e) {
+            Log.w(TAG, "assemble: " + e);
+            return null;
+        }
+    }
+
+    /** Who the rows are for and from where: a different profile or server gets its own saved feed. */
+    private String feedKey() {
+        try {
+            return sha1(acc.profile() + "|" + acc.list(Accounts.JF_USERS) + "|" + acc.get(Accounts.JF_URL) + "|"
+                    + acc.get(Accounts.ND_URL) + "|" + acc.get(Accounts.HA_URL)).substring(0, 12);
+        } catch (Exception e) {
+            return "default";
+        }
     }
 
     private interface RowSource { JSONArray load() throws Exception; }
-
-    private static void addRow(JSONArray rows, String id, String title, RowSource src) {
-        try {
-            JSONArray items = src.load();
-            if (items.length() > 0) rows.put(new JSONObject().put("id", id).put("title", title).put("items", items));
-        } catch (Exception e) {
-            Log.w(TAG, "row " + id + ": " + e);
-        }
-    }
 
     // ---------- Jellyfin ----------
 
@@ -201,10 +286,24 @@ final class FeedClient {
 
     private JSONArray merged(PathFor pf) throws Exception {
         Map<String, Object[]> merged = new LinkedHashMap<>();   // id -> {item, who(List), last(String)}
+        // Everyone's request at once (a Family room can have twenty people), merged in the same order as before.
+        List<String> names = new ArrayList<>();
+        List<Future<String>> replies = new ArrayList<>();
         for (String name : roomUsers()) {
             String uid = userId(name);
             if (uid == null) continue;
-            JSONArray items = new JSONObject(jfText(pf.path(uid))).optJSONArray("Items");
+            names.add(name);
+            replies.add(PEOPLE.submit(() -> jfText(pf.path(uid))));
+        }
+        for (int n = 0; n < names.size(); n++) {
+            String name = names.get(n);
+            JSONArray items;
+            try {
+                items = new JSONObject(replies.get(n).get()).optJSONArray("Items");
+            } catch (Exception e) {
+                Log.w(TAG, "rows for " + name + ": " + e.getCause());
+                continue;
+            }
             if (items == null) continue;
             for (int i = 0; i < items.length(); i++) {
                 JSONObject it = items.getJSONObject(i);
@@ -465,26 +564,56 @@ final class FeedClient {
         Bitmap hit = MEM.get(memKey);
         if (hit != null) { view.setImageBitmap(hit); return; }
         view.setImageDrawable(null);
-        net.execute(() -> {
-            Bitmap bmp = null;
-            try {
-                int w = Math.max(reqW, 360);
-                File f = new File(diskCache, sha1(key + "@" + w));
-                byte[] data;
-                if (f.isFile() && System.currentTimeMillis() - f.lastModified() < 7L * 86400_000) {
-                    data = readAll(new java.io.FileInputStream(f));
-                } else {
-                    data = fetchImage(key, w);
-                    writeAtomic(f, data);
-                }
-                bmp = decode(data, reqW, reqH);
-            } catch (Exception e) {
-                Log.w(TAG, "image " + key + ": " + e);
+        load(key, reqW, reqH, view);
+    }
+
+    /** Warm the memory cache for cards that are not on screen yet, so scrolling right shows art at once. */
+    void prefetch(String key, int reqW, int reqH) {
+        if (key == null || key.isEmpty() || MEM.get(key + "@" + reqW) != null) return;
+        load(key, reqW, reqH, null);
+    }
+
+    private void load(String key, int reqW, int reqH, ImageView view) {
+        String memKey = key + "@" + reqW;
+        synchronized (INFLIGHT) {
+            List<ImageView> waiting = INFLIGHT.get(memKey);
+            if (waiting != null) { if (view != null) waiting.add(view); return; }
+            waiting = new ArrayList<>();
+            if (view != null) waiting.add(view);
+            INFLIGHT.put(memKey, waiting);
+        }
+        int w = Math.max(reqW, 360);
+        File f;
+        try { f = new File(diskCache, sha1(key + "@" + w)); } catch (Exception e) { finish(memKey, key, null); return; }
+        // Pictures already on disk never wait behind downloads.
+        IMG_DISK.execute(() -> {
+            if (f.isFile() && System.currentTimeMillis() - f.lastModified() < 7L * 86400_000) {
+                Bitmap bmp = null;
+                try { bmp = decode(readAll(new java.io.FileInputStream(f)), reqW, reqH); } catch (Exception e) { Log.w(TAG, "image " + key + ": " + e); }
+                if (bmp != null) { finish(memKey, key, bmp); return; }
             }
-            if (bmp == null) return;
-            MEM.put(memKey, bmp);
-            Bitmap b = bmp;
-            main.post(() -> { if (key.equals(view.getTag(R.id.feed_image_tag))) view.setImageBitmap(b); });
+            IMG_NET.execute(() -> {
+                Bitmap bmp = null;
+                try {
+                    byte[] data = fetchImage(key, w);
+                    writeAtomic(f, data);
+                    bmp = decode(data, reqW, reqH);
+                } catch (Exception e) {
+                    Log.w(TAG, "image " + key + ": " + e);
+                }
+                finish(memKey, key, bmp);
+            });
+        });
+    }
+
+    private void finish(String memKey, String key, Bitmap bmp) {
+        List<ImageView> waiting;
+        synchronized (INFLIGHT) { waiting = INFLIGHT.remove(memKey); }
+        if (bmp == null || waiting == null) return;
+        MEM.put(memKey, bmp);
+        if (waiting.isEmpty()) return;
+        main.post(() -> {
+            for (ImageView v : waiting) if (key.equals(v.getTag(R.id.feed_image_tag))) v.setImageBitmap(bmp);
         });
     }
 
@@ -576,12 +705,15 @@ final class FeedClient {
             c.setDoOutput(true);
             try (OutputStream os = c.getOutputStream()) { os.write(body); }
         }
+        // No disconnect() on success: reading the body to the end hands the socket back to the keep-alive pool,
+        // so the next request to the same server skips the TCP handshake.
         try {
             int code = c.getResponseCode();
             if (code != 200) throw new java.io.IOException("HTTP " + code);
             return readAll(c.getInputStream());
-        } finally {
+        } catch (Exception e) {
             c.disconnect();
+            throw e;
         }
     }
 

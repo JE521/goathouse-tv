@@ -143,6 +143,17 @@ final class MediaShelf {
         if (sig.equals(lastJson)) return;          // nothing new: keep focus and scroll exactly where they are
         boolean hadFocus = scroll.hasFocus();
         lastJson = sig;
+        if (data != null && sameRows(data)) {
+            // Same rows, new contents (progress moved, a new episode): update the cards where they are. No rebuild,
+            // no lost focus, no hitch, and pictures already shown stay up.
+            for (int i = 0; i < data.length(); i++) {
+                ViewGroup row = (ViewGroup) rows.getChildAt(i);
+                ((CardAdapter) ((RecyclerView) row.getChildAt(1)).getAdapter()).update(data.optJSONObject(i).optJSONArray("items"));
+            }
+            prefetch(data);
+            Log.i(TAG, "updated " + data.length() + " rows in place");
+            return;
+        }
         rows.removeAllViews();
         if (data == null || data.length() == 0) {
             scroll.setVisibility(View.GONE);
@@ -158,6 +169,7 @@ final class MediaShelf {
         boolean show = rows.getChildCount() > 0;
         scroll.setVisibility(show ? View.VISIBLE : View.GONE);
         Log.i(TAG, "bound " + rows.getChildCount() + " rows");
+        prefetch(data);
         if (hadFocus && show) focusFirst();
         if (show) {
             boolean first = !shownOnce;
@@ -166,8 +178,45 @@ final class MediaShelf {
         }
     }
 
+    /** True when the shelf already shows exactly these rows (same ids, same order), each with items. */
+    private boolean sameRows(JSONArray data) {
+        if (rows.getChildCount() == 0 || rows.getChildCount() != data.length()) return false;
+        for (int i = 0; i < data.length(); i++) {
+            JSONObject r = data.optJSONObject(i);
+            JSONArray items = r == null ? null : r.optJSONArray("items");
+            if (items == null || items.length() == 0 || !r.optString("id").equals(rows.getChildAt(i).getTag())) return false;
+        }
+        return true;
+    }
+
+    /** Load the first cards' pictures of every row into memory now, so they are there when the row scrolls. */
+    private void prefetch(JSONArray data) {
+        int h = (int) (96 * dp);
+        for (int i = 0; i < data.length(); i++) {
+            JSONObject r = data.optJSONObject(i);
+            JSONArray items = r == null ? null : r.optJSONArray("items");
+            if (items == null) continue;
+            boolean square = isSquare(r.optString("id"));
+            int w = square ? h : (int) (171 * dp);
+            for (int j = 0; j < Math.min(10, items.length()); j++) {
+                JSONObject it = items.optJSONObject(j);
+                if (it != null) client.prefetch(artFor(it, w, h), w, h);
+            }
+        }
+    }
+
+    private static boolean isSquare(String rowId) {
+        return "music".equals(rowId) || "playlists".equals(rowId) || "recentmusic".equals(rowId);
+    }
+
+    /** Landscape cards want the backdrop; square music cards the cover. */
+    private static String artFor(JSONObject it, int w, int h) {
+        return w > h ? it.optString("backdrop", it.optString("image")) : it.optString("image");
+    }
+
     private View buildRow(String title, String id, JSONArray items) {
         LinearLayout row = new LinearLayout(ctx);
+        row.setTag(id);
         row.setOrientation(LinearLayout.VERTICAL);
         row.setClipChildren(false);
         row.setClipToPadding(false);
@@ -181,7 +230,7 @@ final class MediaShelf {
         label.setPadding((int) (4 * dp), (int) (4 * dp), 0, (int) (6 * dp));
         row.addView(label);
 
-        boolean square = "music".equals(id) || "playlists".equals(id) || "recentmusic".equals(id);
+        boolean square = isSquare(id);
         RecyclerView list = new RecyclerView(ctx);
         list.setLayoutManager(new LinearLayoutManager(ctx, RecyclerView.HORIZONTAL, false));
         list.setClipChildren(false);
@@ -189,18 +238,34 @@ final class MediaShelf {
         list.setPadding((int) (4 * dp), (int) (4 * dp), (int) (40 * dp), (int) (8 * dp));
         list.setOverScrollMode(View.OVER_SCROLL_NEVER);
         list.setItemAnimator(null);
+        list.setHasFixedSize(true);
+        list.setItemViewCacheSize(6);
         list.setAdapter(new CardAdapter(items, square));
         row.addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return row;
     }
 
     private final class CardAdapter extends RecyclerView.Adapter<CardHolder> {
-        private final JSONArray items;
+        private JSONArray items;
         private final boolean square;
 
         CardAdapter(JSONArray items, boolean square) {
             this.items = items;
             this.square = square;
+            setHasStableIds(true);   // focus stays on the same show when the row's contents are updated
+        }
+
+        void update(JSONArray fresh) {
+            items = fresh;
+            notifyDataSetChanged();
+        }
+
+        @Override public long getItemId(int position) {
+            JSONObject it = items.optJSONObject(position);
+            String id = it == null ? "" : it.optString("id", it.optString("title"));
+            long hsh = 1125899906842597L;
+            for (int i = 0; i < id.length(); i++) hsh = 31 * hsh + id.charAt(i);
+            return hsh;
         }
 
         @Override public int getItemCount() { return items.length(); }
@@ -353,9 +418,9 @@ final class MediaShelf {
                 lp.width = (int) (w * p);
                 progressFill.setLayoutParams(lp);
             }
-            // Landscape cards want the backdrop; square music cards the cover.
-            String path = w > h ? it.optString("backdrop", it.optString("image")) : it.optString("image");
-            client.image(art, path, w, h);
+            String path = artFor(it, w, h);
+            // Same picture as before (an in-place update): leave it up instead of blanking and reloading it.
+            if (!path.equals(art.getTag(R.id.feed_image_tag)) || art.getDrawable() == null) client.image(art, path, w, h);
             // The row's last card: Right stops here instead of jumping to whatever is to the right on screen.
             card.setOnKeyListener((v, keyCode, e) -> {
                 if (e.getAction() != KeyEvent.ACTION_DOWN) return false;
